@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project runtime data (auto-generated)
+output/pdfs/
+output/reports/
+server/.session_data/
+
+# Server local config
+server/.server_config.json
+
+# Claude Code
+.claude/
+
+# Memory
+.memory/
+
+# Deploy secrets
+deploy/.env
+
+# Node (if any)
+node_modules/

@@ -1,0 +1,195 @@
+# Scholar Buddy — AI 文献综述与学术助手
+
+一个基于 LLM 的学术文献助手，支持多维文献检索、相似文献推荐、深度分析，以及自动化文献综述报告生成。
+
+## 功能
+
+- **智能文献检索** — 自动规划检索维度，多数据库并发搜索（PubMed、arXiv、Semantic Scholar、OpenAlex、Crossref）
+- **多维文献综述** — 三阶段流程：规划维度 → 多库搜索 → 生成 HTML/Markdown 综述报告
+- **相似文献推荐** — 给定一篇论文，自动查找语义相似文献并比较差异
+- **深度论文分析** — 对特定论文进行结构化深度解读（背景、方法、发现、局限）
+- **PDF 上传** — 上传 PDF 全文，智能体自动读取并基于内容回答问题
+- **文献卡片展示** — 搜索结果以可视化卡片呈现，含标题翻译、期刊、引用数、IF 值
+- **实时对话** — WebSocket 流式输出，支持中断回复
+- **对话记录管理** — 自动保存历史，侧边栏切换，LLM 自动生成会话标题
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.11+
+- API Key（DeepSeek / OpenAI / Anthropic 任选其一）
+
+### 本地运行
+
+```bash
+# 1. 安装依赖
+pip install -r requirements.txt
+
+# 2. 设置 API Key（以 DeepSeek 为例）
+export OPENAI_API_KEY=sk-你的密钥
+export OPENAI_BASE_URL=https://api.deepseek.com/v1
+
+# 3. 启动服务
+uvicorn server.main:app --host 127.0.0.1 --port 8000
+
+# 4. 打开浏览器访问
+open http://localhost:8000
+```
+
+> Windows 用户请使用 `set OPENAI_API_KEY=sk-xxx` 而非 `export`。
+
+### Docker 运行
+
+```bash
+docker build -t scholar-buddy .
+docker run -p 8000:8000 \
+  -e OPENAI_API_KEY=sk-xxx \
+  -e OPENAI_BASE_URL=https://api.deepseek.com/v1 \
+  scholar-buddy
+```
+
+## 使用指南
+
+### 第一步：设置模型
+
+打开页面后，点击左上角设置图标，填入：
+- **API Key** — 你的 LLM 密钥
+- **API Base URL** — 例如 `https://api.deepseek.com/v1`
+- **Model** — 例如 `deepseek-chat`
+
+> 如果已经设置了环境变量，可以跳过此步。
+
+### 第二步：开始对话
+
+在输入框输入你的需求，例如：
+
+| 需求 | 示例指令 |
+|------|---------|
+| **快速找文献** | "帮我找5篇关于CAR-T治疗实体瘤的最新论文" |
+| **写文献综述** | "帮我写一篇关于联邦学习的文献综述" |
+| **深度分析论文** | "分析这篇文章：Attention Is All You Need" |
+| **找相似文献** | "找跟这篇类似的文章：标题是xxx" |
+| **上传 PDF 分析** | 点击上传按钮上传 PDF，然后提问"这篇论文的主要方法是什么？" |
+
+### 文献综述流程
+
+当你说"帮我写一篇文献综述"时，系统会自动执行三阶段流程：
+
+```
+Phase 1: 规划 → LLM 自动设计 3-5 个检索维度，等待你确认
+Phase 2: 搜索 → 多数据库并发搜索，每维度结果以卡片展示
+Phase 3: 生成 → 生成带参考文献和影响因子(IF)的完整 HTML 综述报告
+```
+
+每个阶段结束后会请求你的确认，你可以：
+- **确认** → 进入下一阶段
+- **修改** → 提供反馈意见，LLM 会根据反馈调整
+
+### PDF 上传
+
+支持上传 PDF 文件（论文全文），上传后智能体会自动读取内容。你可以：
+- 询问论文主要内容
+- 要求解读论文中的图表
+- 让智能体基于全文进行深度分析
+
+> PDF 全文每次对话只注入一次，避免重复消耗上下文窗口。
+
+## 部署方式
+
+### 方案一：本机运行（最简单）
+
+```bash
+uvicorn server.main:app --host 127.0.0.1 --port 8000
+```
+
+只供本地使用，无需网络配置。
+
+### 方案二：VPS + Cloudflare Tunnel（对外分享，推荐）
+
+1. 购买 VPS（推荐 RackNerd $15/年 或 阿里云轻量 ¥24/月）
+2. SSH 登录后执行：
+
+```bash
+# 安装 Python 依赖
+apt update && apt install -y python3-pip git
+pip3 install -r requirements.txt
+
+# 启动服务
+uvicorn server.main:app --host 127.0.0.1 --port 8000
+
+# 安装 Cloudflare Tunnel
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+chmod +x /usr/local/bin/cloudflared
+
+# 暴露到公网
+cloudflared tunnel --url http://127.0.0.1:8000
+```
+
+Cloudflare Tunnel 会生成一个 `https://xxxx.trycloudflare.com` 链接，发给朋友即可使用。**无需备案、无需域名、自动 SSL，无超时限制。**
+
+### 方案三：Hugging Face Spaces
+
+1. 在 https://huggingface.co/new-space 创建 Docker Space
+2. 代码推送到 Space
+3. 在 Settings → Repository Secrets 设置 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`
+
+> 注意：免费 HF Spaces 空闲时会休眠，唤醒需等待约 30 秒，且重启后对话记录会丢失。
+
+## 支持的数据库
+
+| 数据库 | 用途 |
+|-------|------|
+| **PubMed** | 生物医学文献 |
+| **arXiv** | 计算机科学、AI/ML、物理预印本 |
+| **Semantic Scholar** | 通用学术搜索，含引用关系 |
+| **OpenAlex** | 多学科综合检索 |
+| **Crossref** | 有 DOI 的期刊文章 |
+
+## 项目结构
+
+```
+├── core/                    # 核心引擎
+│   ├── agent.py             # LLM 智能体（对话、工具调用）
+│   ├── prompt.py            # 系统提示词构造
+│   ├── tools.py             # 工具发现与注册
+│   ├── session.py           # 会话持久化
+│   ├── memory.py            # Auto Memory 系统
+│   ├── skills.py            # 技能系统
+│   ├── subagent.py          # 子智能体管理
+│   ├── mcp_client.py        # MCP 协议客户端
+│   └── ui.py                # 终端 UI 输出
+├── server/                   # Web 服务器
+│   ├── main.py              # FastAPI 入口（REST + WebSocket）
+│   ├── web_agent.py         # WebSocket 适配层
+│   ├── session_store.py     # 会话状态管理
+│   └── static/              # 前端资源
+│       ├── index.html       # 主页面
+│       ├── app.js           # 前端交互逻辑
+│       ├── style.css        # 样式
+│       └── literature-visualization.css  # 文献卡片样式
+├── tools/                    # 工具定义
+│   ├── literature_agent.py  # 文献检索工具集
+│   ├── base.py              # 工具基类
+│   └── journal-if/          # 期刊影响因子数据
+├── deploy/                   # 部署配置
+│   ├── nginx.conf           # Nginx 反代配置
+│   ├── docker-compose.yml   # Docker Compose
+│   ├── setup.sh             # VPS 一键部署脚本
+│   └── .env.example         # 环境变量模板
+├── Dockerfile               # Docker 构建
+├── requirements.txt         # Python 依赖
+└── launcher.py              # 本地快速启动
+```
+
+## 技术栈
+
+- **后端**: Python 3.12, FastAPI, Uvicorn, WebSocket
+- **前端**: 原生 HTML/CSS/JavaScript（无框架依赖）
+- **LLM**: DeepSeek / OpenAI / Anthropic API
+- **文献数据**: Semantic Scholar API, OpenAlex API, PubMed API, arXiv API
+- **PDF 解析**: PyMuPDF
+
+## License
+
+MIT

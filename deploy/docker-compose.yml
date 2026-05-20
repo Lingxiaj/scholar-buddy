@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  app:
+    build: ..
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      # Persist uploaded PDFs and generated reports
+      - app_output:/app/output
+      # Persist session history
+      - app_sessions:/root/.mini-claude/sessions
+      # Persist server config (model selection, etc.)
+      - app_config:/app/server
+    restart: unless-stopped
+
+volumes:
+  app_output:
+  app_sessions:
+  app_config:

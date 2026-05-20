@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.git
+.gitignore
+output/pdfs/
+output/reports/
+server/.server_config.json
+.DS_Store
+*.log
+.memory/
+.claude/

@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Chat</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/literature-visualization.css">
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <div class="sidebar-header">
+      <h2>Agent</h2>
+      <span class="status-indicator" id="statusIndicator"></span>
+    </div>
+    <button id="newSessionBtn" class="btn-small btn-new-chat">+ New Chat</button>
+    <div id="sessionList"></div>
+    <div class="sidebar-footer">
+      <button id="clearChatBtn" class="btn-icon" title="清空对话显示（不删除历史）">&#128465;</button>
+      <button id="settingsBtn" class="btn-icon" title="Settings">&#9881;</button>
+    </div>
+  </div>
+  <div id="main">
+    <div id="messages">
+      <div id="thinkingIndicator" class="thinking hidden">
+        <div class="spinner"></div>
+        <span class="thinking-text">Thinking...</span>
+      </div>
+      <div id="progressBar" class="progress-bar hidden">
+        <div class="progress-label">searching...</div>
+        <div class="progress-track">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div class="progress-count" id="progressCount"></div>
+      </div>
+    </div>
+    <div id="input-area">
+      <textarea id="input" rows="1" placeholder="Type a message..." disabled></textarea>
+      <button id="uploadBtn" class="btn-icon" title="上传PDF">&#128196;</button>
+      <input type="file" id="fileInput" accept=".pdf" style="display:none">
+      <button id="sendBtn" disabled>Send</button>
+      <button id="stopBtn" class="hidden" title="停止回复">■ Stop</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Dialog -->
+<div id="confirmOverlay" class="overlay hidden">
+  <div class="dialog">
+    <h3>Confirm Action</h3>
+    <p id="confirmMessage"></p>
+    <div class="dialog-actions">
+      <button id="confirmAllow" class="btn-allow">Allow</button>
+      <button id="confirmDeny" class="btn-deny">Deny</button>
+    </div>
+  </div>
+</div>
+
+<!-- Plan Approval Dialog -->
+<div id="planOverlay" class="overlay hidden">
+  <div class="dialog dialog-wide">
+    <h3>Plan Approval</h3>
+    <div id="planContent" class="plan-content"></div>
+    <div class="dialog-actions">
+      <button id="planExecute" class="btn-allow">Execute</button>
+      <button id="planClearExecute" class="btn-allow">Clear & Execute</button>
+      <button id="planManual" class="btn-allow">Manual Execute</button>
+      <button id="planKeepPlanning" class="btn-deny">Keep Planning</button>
+    </div>
+    <div class="plan-feedback-area">
+      <textarea id="planFeedback" rows="2" placeholder="Optional feedback for Keep Planning..."></textarea>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Dialog -->
+<div id="settingsOverlay" class="overlay hidden">
+  <div class="dialog dialog-settings">
+    <h3>Settings</h3>
+    <div class="form-field">
+      <label for="settingsModel">Model</label>
+      <input type="text" id="settingsModel" placeholder="e.g. deepseek-v4-pro, gpt-4o, claude-opus-4-6">
+    </div>
+    <div class="form-field">
+      <label for="settingsApiKey">API Key</label>
+      <input type="password" id="settingsApiKey" placeholder="sk-...">
+      <span class="field-hint">Leave empty to use server env vars</span>
+    </div>
+    <div class="form-field">
+      <label for="settingsApiBase">API Base URL</label>
+      <input type="text" id="settingsApiBase" placeholder="e.g. https://aihubmix.com/v1">
+      <span class="field-hint">Leave empty to use ANTHROPIC_BASE_URL or OPENAI_BASE_URL from server</span>
+    </div>
+    <div class="dialog-actions">
+      <button id="settingsCancel" class="btn-cancel">Cancel</button>
+      <button id="settingsSave" class="btn-allow">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+(function() {
+    // ========================================================================
+    // 状态管理
+    // ========================================================================
+    const state = {
+        sessionId: null,
+        ws: null,
+        thinking: false,
+        settings: {},
+        pendingMessages: [],
+        litDimensions: [],
+        litSearchResults: {},
+        litReport: null,
+        litPhase: null,
+    };
+
+    // DOM 引用
+    const $ = (id) => document.getElementById(id);
+    const messagesEl = $('messages');
+    const inputEl = $('input');
+    const sendBtn = $('sendBtn');
+    const stopBtn = $('stopBtn');
+    const uploadBtn = $('uploadBtn');
+    const fileInput = $('fileInput');
+    const thinkingIndicator = $('thinkingIndicator');
+    const progressBar = $('progressBar');
+    const progressFill = $('progressFill');
+    const progressCount = $('progressCount');
+    const sessionListEl = $('sessionList');
+    const newSessionBtn = $('newSessionBtn');
+    const statusIndicator = $('statusIndicator');
+
+    // ========================================================================
+    // 初始化
+    // ========================================================================
+
+    function init() {
+        state.sessionId = localStorage.getItem('sessionId') || generateId();
+        localStorage.setItem('sessionId', state.sessionId);
+        loadSettings();
+        connectWebSocket();
+        bindEvents();
+        loadSessionList();
+    }
+
+    function restoreLiteratureCards(litState) {
+        if (!litState || (!litState.litDimensions || litState.litDimensions.length === 0) && !litState.litReport) {
+            return;
+        }
+        // 还原状态
+        state.litDimensions = litState.litDimensions || [];
+        state.litSearchResults = litState.litSearchResults || {};
+        state.litReport = litState.litReport || null;
+
+        // 渲染规划卡片
+        if (state.litDimensions.length > 0) {
+            var el = document.createElement('div');
+            el.className = 'literature-phase-card';
+            el.innerHTML = renderPlanCard(state.litDimensions);
+            messagesEl.insertBefore(el, thinkingIndicator);
+        }
+
+        // 渲染各维度搜索结果卡片
+        var dimIds = Object.keys(state.litSearchResults);
+        for (var j = 0; j < dimIds.length; j++) {
+            var sr = state.litSearchResults[dimIds[j]];
+            if (!sr || !sr.papers) continue;
+            var el2 = document.createElement('div');
+            el2.className = 'literature-phase-card';
+            el2.innerHTML = renderSearchCard({
+                dimension_name: sr.dimension_name,
+                dimension_id: dimIds[j],
+                papers: sr.papers,
+                paper_count: sr.paper_count
+            });
+            messagesEl.insertBefore(el2, thinkingIndicator);
+        }
+
+        // 渲染报告卡片
+        if (state.litReport) {
+            var el3 = document.createElement('div');
+            el3.className = 'literature-phase-card';
+            el3.innerHTML = renderReportCard(state.litReport);
+            messagesEl.insertBefore(el3, thinkingIndicator);
+        }
+    }
+
+    function loadMessages() {
+        fetch('/api/sessions/' + state.sessionId + '/messages')
+            .then(function(r) { return r.json(); })
+            .then(function(msgs) {
+                if (!msgs || msgs.length === 0) return;
+                // 清除占位 thinkingIndicator 之外的内容
+                var existing = messagesEl.querySelectorAll('.message, .tool-call, .literature-phase-card');
+                existing.forEach(function(el) { el.remove(); });
+                clearLitState();
+                msgs.forEach(function(msg) {
+                    var div = document.createElement('div');
+                    div.className = 'message ' + (msg.role === 'user' ? 'user' : 'assistant');
+                    div.textContent = msg.content;
+                    messagesEl.insertBefore(div, thinkingIndicator);
+                });
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+                // 恢复文献卡片
+                fetch('/api/sessions/' + state.sessionId + '/lit_state')
+                    .then(function(r) { return r.json(); })
+                    .then(function(litState) { restoreLiteratureCards(litState); })
+                    .catch(function(e) { /* no literature state */ });
+            })
+            .catch(function(e) { console.log('loadMessages error (normal on first visit):', e); });
+    }
+
+    function generateId() {
+        return 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    }
+
+    // ========================================================================
+    // WebSocket
+    // ========================================================================
+
+    function connectWebSocket() {
+        if (state.ws) {
+            state.ws.onclose = null; // prevent old ws onclose from corrupting new connection state
+            state.ws.onmessage = null;
+            state.ws.close();
+        }
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = protocol + '//' + window.location.host + '/ws/' + state.sessionId;
+
+        state.ws = new WebSocket(wsUrl);
+
+        state.ws.onopen = () => {
+            statusIndicator.className = 'status-indicator connected';
+            inputEl.disabled = false;
+            sendBtn.disabled = false;
+            inputEl.focus();
+            while (state.pendingMessages.length > 0) {
+                sendMessage(state.pendingMessages.shift());
+            }
+            loadMessages();
+        };
+
+        state.ws.onclose = () => {
+            statusIndicator.className = 'status-indicator';
+        };
+
+        state.ws.onmessage = (event) => {
+            try { handleMessage(JSON.parse(event.data)); }
+            catch (e) { console.error('Parse error:', e); }
+        };
+    }
+
+    // ========================================================================
+    // 消息分发
+    // ========================================================================
+
+    function handleMessage(data) {
+        switch (data.type) {
+            case 'text_delta': handleTextDelta(data.content); break;
+            case 'tool_call': handleToolCall(data); break;
+            case 'tool_result': handleToolResult(data); break;
+            case 'literature_step': handleLiteratureStep(data); break;
+            case 'literature_confirm_request': handleLiteratureConfirm(data); break;
+            case 'done': handleDone(); break;
+            case 'error': handleError(data.message); break;
+            case 'confirm_request': showConfirmDialog(data.command); break;
+            case 'plan_approval_request': showPlanApproval(data.plan); break;
+        }
+    }
+
+    // ========================================================================
+    // 文献进度（内联可视化卡片）
+    // ========================================================================
+
+    function normalizePhase(raw) {
+        // Handle both "planning" and "ResearchPhase.PLANNING" formats
+        if (raw && raw.indexOf('.') !== -1) {
+            return raw.split('.').pop().toLowerCase();
+        }
+        return raw ? raw.toLowerCase() : raw;
+    }
+
+    function handleLiteratureStep(data) {
+        console.log('[Literature Step]', JSON.stringify(data));
+        var phase = normalizePhase(data.phase);
+        var summary = data.summary;
+        var stepData = data.data;
+
+        // Phase transition: force new assistant bubble when phase changes
+        if (phase !== state.litPhase) {
+            state.litPhase = phase;
+            stopStreaming();
+            currentAssistantMsg = null;
+        }
+
+        // 更新状态
+        if (phase === 'planning' && stepData && stepData.dimensions) {
+            state.litDimensions = stepData.dimensions;
+        } else if (phase === 'searching' && stepData && stepData.dimension_id) {
+            updateSearchProgress();
+            state.litSearchResults[stepData.dimension_id] = {
+                dimension_name: stepData.dimension_name,
+                papers: stepData.papers || [],
+                paper_count: stepData.paper_count || 0
+            };
+        } else if (phase === 'completed' && stepData) {
+            state.litReport = stepData;
+        }
+
+        // 渲染可视化卡片
+        var el = document.createElement('div');
+        el.className = 'literature-phase-card';
+        var dimId = (phase === 'searching' && stepData) ? stepData.dimension_id : null;
+        if (dimId) el.setAttribute('data-dim-id', dimId);
+
+        try {
+            if (phase === 'planning' && state.litDimensions.length > 0) {
+                el.innerHTML = renderPlanCard(state.litDimensions);
+            } else if (phase === 'searching' && stepData && stepData.dimension_id) {
+                el.innerHTML = renderSearchCard(stepData);
+            } else if (phase === 'generating') {
+                el.innerHTML = '<div class="phase-header"><span class="phase-icon">📝</span><h3 class="phase-title">正在生成报告...</h3><span class="phase-badge" style="background:#ff9800;">生成中</span></div><div style="color:var(--text-muted);font-size:13px;">' + escapeHtml(summary || '') + '</div>';
+            } else if (phase === 'completed' && state.litReport) {
+                hideProgress();
+                el.innerHTML = renderReportCard(state.litReport);
+            }
+        } catch (e) {
+            console.error('[Literature Step render error]', e);
+        }
+
+        if (el.innerHTML) {
+            // 如果是搜索阶段且同一维度已有卡片，替换之（避免多轮检索产生重复卡片）
+            var existingCard = dimId ? messagesEl.querySelector('.literature-phase-card[data-dim-id="' + dimId + '"]') : null;
+            if (existingCard) {
+                messagesEl.replaceChild(el, existingCard);
+            } else {
+                messagesEl.insertBefore(el, thinkingIndicator);
+            }
+            stopStreaming();
+            // Clean up any empty assistant bubble left by LLM prelude text
+            if (currentAssistantMsg && !currentAssistantMsg.textContent.trim()) {
+                currentAssistantMsg.remove();
+                currentAssistantMsg = null;
+            }
+        } else {
+            console.log('[Literature Step] no card rendered for phase:', phase, 'summary:', summary);
+        }
+
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function handleLiteratureConfirm(data) {
+        console.log('[Literature Confirm]', JSON.stringify(data));
+        var phase = data.phase;
+        var message = data.message || '';
+
+        if (phase === 'planning') {
+            var planCards = document.querySelectorAll('.literature-phase-card');
+            var lastPlanCard = planCards[planCards.length - 1];
+            if (!lastPlanCard) return;
+
+            var existing = lastPlanCard.querySelector('.lit-confirm-footer');
+            if (existing) existing.remove();
+
+            var footer = document.createElement('div');
+            footer.className = 'lit-confirm-footer';
+            footer.innerHTML =
+                '<div class="lit-confirm-message">' + escapeHtml(message || '\u786E\u8BA4\u68C0\u7D22\u8BA1\u5212\uFF1F') + '</div>' +
+                '<div class="lit-confirm-actions">' +
+                '<button class="lit-confirm-btn lit-confirm-yes" onclick="sendLitConfirm(\'planning\', true, \'\')">\u2714 \u786E\u8BA4\u68C0\u7D22</button>' +
+                '<button class="lit-confirm-btn lit-confirm-revise" onclick="showLitReviseInput(this, \'planning\')">\u21BB \u4FEE\u6539</button>' +
+                '</div>' +
+                '<div class="lit-revise-area" style="display:none;">' +
+                '<div class="lit-revise-input-wrap">' +
+                '<textarea class="lit-revise-input" placeholder="\u8BF7\u8BF4\u660E\u4FEE\u6539\u610F\u89C1\uFF08\u5982\uFF1A\u589E\u52A0\u67D0\u4E2A\u7EF4\u5EA6\u3001\u8C03\u6574\u5173\u952E\u8BCD\u7B49\uFF09" rows="2"></textarea>' +
+                '</div>' +
+                '<div class="lit-revise-actions">' +
+                '<button class="lit-confirm-btn lit-confirm-send" onclick="sendLitRevise(\'planning\')">\u53D1\u9001\u4FEE\u6539\u610F\u89C1</button>' +
+                '<button class="lit-confirm-btn lit-confirm-cancel" onclick="showLitConfirmActions(this)">\u53D6\u6D88</button>' +
+                '</div>' +
+                '</div>';
+            lastPlanCard.appendChild(footer);
+        } else if (phase === 'searching') {
+            var searchSection = document.querySelector('.literature-phase-card.search-section');
+            if (!searchSection) {
+                searchSection = document.createElement('div');
+                searchSection.className = 'literature-phase-card search-section';
+                messagesEl.insertBefore(searchSection, thinkingIndicator);
+            }
+
+            var existing = searchSection.querySelector('.lit-confirm-footer');
+            if (existing) existing.remove();
+
+            var footer = document.createElement('div');
+            footer.className = 'lit-confirm-footer';
+            footer.innerHTML =
+                '<div class="lit-confirm-message">' + escapeHtml(message || '\u68C0\u7D22\u5B8C\u6210\uFF0C\u662F\u5426\u7EE7\u7EED\uFF1F') + '</div>' +
+                '<div class="lit-confirm-actions">' +
+                '<button class="lit-confirm-btn lit-confirm-yes" onclick="sendLitConfirm(\'searching\', true, \'\')">\u2714 \u751F\u6210\u62A5\u544A</button>' +
+                '<button class="lit-confirm-btn lit-confirm-revise" onclick="showLitReviseInput(this, \'searching\')">\u2795 \u6DFB\u52A0\u68C0\u7D22</button>' +
+                '</div>' +
+                '<div class="lit-revise-area" style="display:none;">' +
+                '<div class="lit-revise-input-wrap">' +
+                '<textarea class="lit-revise-input" placeholder="\u8BF7\u8BF4\u660E\u8FD8\u9700\u8981\u68C0\u7D22\u4EC0\u4E48\u5185\u5BB9\uFF08\u5982\uFF1A\u8865\u5145\u67D0\u4E2A\u65B9\u5411\u3001\u8C03\u6574\u5173\u952E\u8BCD\u7B49\uFF09" rows="2"></textarea>' +
+                '</div>' +
+                '<div class="lit-revise-actions">' +
+                '<button class="lit-confirm-btn lit-confirm-send" onclick="sendLitRevise(\'searching\')">\u53D1\u9001\u4FEE\u6539\u610F\u89C1</button>' +
+                '<button class="lit-confirm-btn lit-confirm-cancel" onclick="showLitConfirmActions(this)">\u53D6\u6D88</button>' +
+                '</div>' +
+                '</div>';
+            searchSection.appendChild(footer);
+        }
+
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    // ─── Literature confirm helper functions ──────────────
+
+    window.sendLitConfirm = function(phase, confirmed, feedback) {
+        state.ws.send(JSON.stringify({
+            type: 'literature_confirm_response',
+            phase: phase,
+            confirmed: confirmed,
+            feedback: feedback || ''
+        }));
+        document.querySelectorAll('.lit-confirm-footer').forEach(function(el) { el.remove(); });
+        if (confirmed) {
+            if (phase === 'planning') {
+                showSearchProgress();
+            } else if (phase === 'searching') {
+                showGenerateProgress();
+            }
+        }
+    };
+
+    window.showLitReviseInput = function(btn, phase) {
+        var footer = btn.closest('.lit-confirm-footer');
+        if (!footer) return;
+        footer.querySelector('.lit-confirm-actions').style.display = 'none';
+        footer.querySelector('.lit-revise-area').style.display = 'block';
+    };
+
+    window.showLitConfirmActions = function(btn) {
+        var footer = btn.closest('.lit-confirm-footer');
+        if (!footer) return;
+        footer.querySelector('.lit-revise-area').style.display = 'none';
+        footer.querySelector('.lit-confirm-actions').style.display = 'flex';
+    };
+
+    window.sendLitRevise = function(phase) {
+        var footer = document.querySelector('.lit-confirm-footer');
+        if (!footer) return;
+        var textarea = footer.querySelector('.lit-revise-input');
+        var feedback = textarea ? textarea.value.trim() : '';
+        if (!feedback) {
+            textarea && textarea.focus();
+            return;
+        }
+        window.sendLitConfirm(phase, false, feedback);
+    };
+
+    // ─── Progress bar for long phases ───────────────────────
+
+    var _searchCompleted = 0;
+    var _searchTotal = 0;
+
+    function showSearchProgress() {
+        _searchCompleted = 0;
+        _searchTotal = state.litDimensions.length || 0;
+        if (_searchTotal === 0) return;
+        progressBar.className = 'progress-bar';
+        progressBar.querySelector('.progress-label').textContent = 'searching...';
+        progressFill.style.width = '0%';
+        progressCount.textContent = '0/' + _searchTotal;
+    }
+
+    function updateSearchProgress() {
+        _searchCompleted++;
+        var pct = Math.min(100, Math.round((_searchCompleted / _searchTotal) * 100));
+        progressFill.style.width = pct + '%';
+        progressCount.textContent = _searchCompleted + '/' + _searchTotal;
+        if (_searchCompleted >= _searchTotal) {
+            progressBar.className = 'progress-bar hidden';
+        }
+    }
+
+    function showGenerateProgress() {
+        progressBar.className = 'progress-bar progress-indeterminate';
+        progressBar.querySelector('.progress-label').textContent = 'generating report...';
+        progressFill.style.width = '';
+        progressCount.textContent = '';
+    }
+
+    function hideProgress() {
+        progressBar.className = 'progress-bar hidden';
+        progressFill.style.width = '';
+        progressCount.textContent = '';
+        _searchCompleted = 0;
+        _searchTotal = 0;
+    }
+
+    // ─── 渲染辅助函数 ──────────────────────────────────────
+
+    function renderPlanCard(dimensions) {
+        var html = '\u003Cdiv class="phase-header"\u003E\u003Cspan class="phase-icon"\u003E\u{1F4CB}\u003C/span\u003E\u003Ch3 class="phase-title"\u003E\u68C0\u7D22\u8BA1\u5212\u003C/h3\u003E\u003Cspan class="phase-badge"\u003E' + dimensions.length + ' \u4E2A\u7EF4\u5EA6\u003C/span\u003E\u003C/div\u003E\u003Cdiv class="dimensions-list"\u003E';
+        for (var i = 0; i < dimensions.length; i++) {
+            var dim = dimensions[i];
+            var sources = '';
+            if (dim.preferred_sources && dim.preferred_sources.length > 0 && dim.preferred_sources[0] !== 'auto') {
+                sources = ' | \u6570\u636E\u5E93: ' + dim.preferred_sources.join(', ');
+            }
+            html += '\u003Cdiv class="dimension-item"\u003E' +
+                '\u003Cdetails\u003E' +
+                '\u003Csummary class="dimension-summary"\u003E' +
+                '\u003Cdiv class="dimension-header"\u003E' +
+                '\u003Cdiv class="dimension-number"\u003E' + (i + 1) + '\u003C/div\u003E' +
+                '\u003Cdiv style="font-weight:600;font-size:15px;"\u003E' + escapeHtml(dim.dimension_name) + '\u003C/div\u003E' +
+                '\u003Cdiv style="margin-left:auto;font-size:12px;color:var(--text-muted);"\u003E\u76EE\u6807 ' + dim.target_count + ' \u7BC7' + sources + '\u003C/div\u003E' +
+                '\u003C/div\u003E' +
+                '\u003C/summary\u003E' +
+                '\u003Cdiv class="dimension-details"\u003E' +
+                '\u003Cdiv class="dimension-query"\u003E\u003Ccode\u003E' + escapeHtml(dim.search_keywords) + '\u003C/code\u003E\u003C/div\u003E' +
+                '\u003Cdiv class="dimension-meta"\u003E';
+            if (dim.year_range) html += '\u5E74\u4EFD: ' + escapeHtml(dim.year_range);
+            if (dim.quality_requirement) html += ' | \u8D28\u91CF: ' + escapeHtml(dim.quality_requirement);
+            html += '\u003C/div\u003E\u003C/div\u003E\u003C/details\u003E\u003C/div\u003E';
+        }
+        html += '\u003C/div\u003E';
+        return html;
+    }
+
+    function renderSearchCard(data) {
+        var papers = data.papers || [];
+        if (papers.length === 0) {
+            return '\u003Cdiv class="phase-header"\u003E\u003Cspan class="phase-icon"\u003E\u{1F50D}\u003C/span\u003E\u003Ch3 class="phase-title"\u003E' + escapeHtml(data.dimension_name) + '\u003C/h3\u003E\u003Cspan class="phase-badge"\u003E0 \u7BC7\u003C/span\u003E\u003C/div\u003E\u003Cdiv class="no-papers-msg"\u003E\u8BE5\u7EF4\u5EA6\u672A\u68C0\u7D22\u5230\u6587\u732E\u003C/div\u003E';
+        }
+        var html = '\u003Cdiv class="phase-header"\u003E\u003Cspan class="phase-icon"\u003E\u{1F50D}\u003C/span\u003E\u003Ch3 class="phase-title"\u003E' + escapeHtml(data.dimension_name) + '\u003C/h3\u003E\u003Cspan class="phase-badge"\u003E' + papers.length + ' \u7BC7\u003C/span\u003E\u003C/div\u003E\u003Cdiv class="papers-card-list"\u003E';
+        for (var i = 0; i < papers.length; i++) {
+            var p = papers[i];
+            var ifText = '', ifClass = 'paper-if';
+            if (p.impact_factor) {
+                ifText = 'IF ' + Number(p.impact_factor).toFixed(1);
+                if (p.impact_factor >= 10) ifClass += ' if-high';
+                else if (p.impact_factor >= 5) ifClass += ' if-mid';
+            } else if (p.citation_count) {
+                ifText = '\u{1F4AC}' + p.citation_count;
+            }
+            var titleHtml = p.url ? '\u003Ca href="' + escapeHtml(p.url) + '" target="_blank" class="paper-link" rel="noopener"\u003E' + escapeHtml(p.title) + '\u003C/a\u003E' : escapeHtml(p.title);
+            var titleCnHtml = p.title_cn ? '\u003Cdiv class="paper-title-cn"\u003E' + escapeHtml(p.title_cn) + '\u003C/div\u003E' : '';
+            var authors = p.authors ? (p.authors.length > 60 ? escapeHtml(p.authors.slice(0, 60)) + '...' : escapeHtml(p.authors)) : '';
+            var tags = '';
+            if (authors) tags += '\u003Cspan class="paper-tag paper-tag-author"\u003E' + authors + '\u003C/span\u003E';
+            if (p.journal) tags += '\u003Cspan class="paper-tag paper-tag-journal"\u003E' + escapeHtml(p.journal) + '\u003C/span\u003E';
+            if (p.year) tags += '\u003Cspan class="paper-tag paper-tag-year"\u003E' + p.year + '\u003C/span\u003E';
+            if (ifText) tags += '\u003Cspan class="paper-tag ' + ifClass + '"\u003E' + ifText + '\u003C/span\u003E';
+            html += '\u003Cdiv class="paper-card"\u003E' +
+                '\u003Cdetails class="paper-details"\u003E' +
+                '\u003Csummary class="paper-summary"\u003E' +
+                '\u003Cdiv class="paper-card-title"\u003E' + titleHtml + '\u003C/div\u003E' +
+                titleCnHtml +
+                '\u003C/summary\u003E' +
+                '\u003Cdiv class="paper-abstract"\u003E' + (p.abstract ? escapeHtml(p.abstract) : '\u6682\u65E0\u6458\u8981') + '\u003C/div\u003E' +
+                '\u003C/details\u003E' +
+                '\u003Cdiv class="paper-tags"\u003E' + tags + '\u003C/div\u003E' +
+                '\u003C/div\u003E';
+        }
+        html += '\u003C/div\u003E';
+        return html;
+    }
+
+    function renderReportCard(report) {
+        var html = '\u003Cdiv class="phase-header"\u003E\u003Cspan class="phase-icon"\u003E\u{1F4D1}\u003C/span\u003E\u003Ch3 class="phase-title"\u003E' + escapeHtml(report.title || '\u7EFC\u8FF0\u62A5\u544A') + '\u003C/h3\u003E\u003Cspan class="phase-badge"\u003E' + (report.total_papers || 0) + ' \u7BC7\u7EFC\u8FF0\u003C/span\u003E\u003C/div\u003E';
+        html += '\u003Cdiv class="report-content"\u003E\u003Cp\u003E\u003Cstrong\u003E\u6838\u5FC3\u7ED3\u8BBA\uFF1A\u003C/strong\u003E' + escapeHtml(report.summary || '') + '\u003C/p\u003E\u003C/div\u003E';
+        html += '\u003Cdiv class="report-actions"\u003E';
+        if (report.html_path) {
+            var href = '/api/report?path=' + encodeURIComponent(report.html_path);
+            var dlHref = href + '&download=1';
+            html += '\u003Ca href="' + href + '" class="btn-view-full-report" target="_blank"\u003E' +
+                '\u{1F4C4} \u6253\u5F00\u5B8C\u6574\u62A5\u544A\u003C/a\u003E' +
+                '\u003Ca href="' + dlHref + '" class="btn-view-full-report" download style="margin-left:8px;background:#43a047;"\u003E' +
+                '\u{2B07} \u4E0B\u8F7D\u003C/a\u003E';
+        }
+        if (report.markdown_path) {
+            html += '\u003Ca href="/api/report?path=' + encodeURIComponent(report.markdown_path) + '" class="btn-view-full-report" target="_blank" style="margin-left:8px;background:#4a2a5a;"\u003E' +
+                '\u{1F4DD} Markdown\u003C/a\u003E';
+        }
+        html += '\u003C/div\u003E';
+        return html;
+    }
+
+    // ========================================================================
+    // 聊天
+    // ========================================================================
+
+    let currentAssistantMsg = null;
+    let currentToolCallEl = null;
+
+    function stopStreaming() {
+        if (currentAssistantMsg) {
+            currentAssistantMsg.classList.remove('streaming');
+        }
+    }
+
+    function handleTextDelta(content) {
+        if (!currentAssistantMsg) {
+            currentAssistantMsg = document.createElement('div');
+            currentAssistantMsg.className = 'message assistant streaming';
+            messagesEl.insertBefore(currentAssistantMsg, thinkingIndicator);
+            // 有内容了，隐藏 thinking 指示器
+            thinkingIndicator.classList.add('hidden');
+        }
+        currentAssistantMsg.innerHTML += escapeHtml(content);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function handleToolCall(data) {
+        stopStreaming();
+        // Remove empty/whitespace-only assistant bubbles left over from LLM prelude text
+        if (currentAssistantMsg && !currentAssistantMsg.textContent.trim()) {
+            currentAssistantMsg.remove();
+        }
+        currentAssistantMsg = null;
+        // Update thinking indicator text for literature phase tools
+        var thinkingText = document.querySelector('.thinking-text');
+        if (data.name === 'literature_plan') {
+            thinkingText.textContent = 'planning...';
+            thinkingIndicator.classList.remove('hidden');
+        } else if (data.name === 'literature_db_search') {
+            thinkingText.textContent = 'searching...';
+            thinkingIndicator.classList.remove('hidden');
+        } else if (data.name === 'literature_generate_report') {
+            thinkingText.textContent = 'generating...';
+            thinkingIndicator.classList.remove('hidden');
+        }
+        const div = document.createElement('div');
+        div.className = 'tool-call';
+        div.innerHTML = '<span class="tool-icon">\u{1F527}</span> <strong>' + escapeHtml(data.name) + '</strong>';
+        messagesEl.insertBefore(div, thinkingIndicator);
+        currentToolCallEl = div;
+    }
+
+    function handleToolResult(data) {
+        if (currentToolCallEl && data.result) {
+            const preview = data.result.length > 200 ? data.result.slice(0, 200) + '...' : data.result;
+            const detail = document.createElement('div');
+            detail.className = 'tool-result';
+            detail.textContent = preview;
+            currentToolCallEl.appendChild(detail);
+        }
+    }
+
+    function handleDone() {
+        state.thinking = false;
+        thinkingIndicator.classList.add('hidden');
+        document.querySelector('.thinking-text').textContent = 'Thinking...';
+        inputEl.disabled = false;
+        sendBtn.disabled = false;
+        stopBtn.classList.add('hidden');
+        stopBtn.disabled = false;
+        stopBtn.textContent = '■ Stop';
+        inputEl.focus();
+        if (currentAssistantMsg) {
+            currentAssistantMsg.classList.remove('streaming');
+        }
+        currentAssistantMsg = null;
+        currentToolCallEl = null;
+        loadSessionList();
+    }
+
+    function handleError(message) {
+        handleDone();
+        const div = document.createElement('div');
+        div.className = 'message error';
+        div.textContent = 'Error: ' + message;
+        messagesEl.insertBefore(div, thinkingIndicator);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    // ========================================================================
+    // 发送
+    // ========================================================================
+
+    function sendMessage(text) {
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+            state.pendingMessages.push(text);
+            return;
+        }
+        const userDiv = document.createElement('div');
+        userDiv.className = 'message user';
+        userDiv.textContent = text;
+        messagesEl.insertBefore(userDiv, thinkingIndicator);
+
+        state.ws.send(JSON.stringify({ type: 'message', content: text }));
+        state.thinking = true;
+        thinkingIndicator.classList.remove('hidden');
+        inputEl.value = '';
+        sendBtn.disabled = true;
+        stopBtn.classList.remove('hidden');
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function uploadPdf(file) {
+        if (!file) return;
+        if (file.name.length > 200) { alert('Filename too long'); return; }
+        if (file.size > 50 * 1024 * 1024) { alert('File too large (max 50 MB)'); return; }
+
+        // Show uploading indicator
+        var infoDiv = document.createElement('div');
+        infoDiv.className = 'message system';
+        infoDiv.textContent = 'Uploading ' + file.name + '...';
+        messagesEl.insertBefore(infoDiv, thinkingIndicator);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+
+        var formData = new FormData();
+        formData.append('session_id', state.sessionId);
+        formData.append('file', file);
+
+        fetch('/api/upload_pdf', { method: 'POST', body: formData })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                infoDiv.remove();
+                if (data.error) {
+                    var errDiv = document.createElement('div');
+                    errDiv.className = 'message error';
+                    errDiv.textContent = 'Upload failed: ' + data.error;
+                    messagesEl.insertBefore(errDiv, thinkingIndicator);
+                } else {
+                    // Show PDF card with icon (not raw text)
+                    var pdfDiv = document.createElement('div');
+                    pdfDiv.className = 'message pdf-card';
+                    pdfDiv.innerHTML = '<div class="pdf-icon">&#128196;</div>' +
+                        '<div class="pdf-info">' +
+                        '<div class="pdf-filename">' + escapeHtml(data.filename) + '</div>' +
+                        '<div class="pdf-meta">' + data.page_count + ' 页, ' + data.char_count + ' 字符</div>' +
+                        '</div>';
+                    messagesEl.insertBefore(pdfDiv, thinkingIndicator);
+                }
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+            })
+            .catch(function(err) {
+                infoDiv.remove();
+                var errDiv = document.createElement('div');
+                errDiv.className = 'message error';
+                errDiv.textContent = 'Upload failed: ' + err.message;
+                messagesEl.insertBefore(errDiv, thinkingIndicator);
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+            });
+        fileInput.value = '';
+    }
+
+    // ========================================================================
+    // UI
+    // ========================================================================
+
+    function escapeHtml(str) {
+        var d = document.createElement('div');
+        d.textContent = str;
+        return d.innerHTML;
+    }
+
+    function clearLitState() {
+        state.litDimensions = [];
+        state.litSearchResults = {};
+        state.litReport = null;
+        state.litPhase = null;
+    }
+
+    function showConfirmDialog(command) {
+        $('confirmMessage').textContent = command;
+        $('confirmOverlay').classList.remove('hidden');
+        $('confirmAllow').onclick = function() { $('confirmOverlay').classList.add('hidden'); state.ws.send(JSON.stringify({ type: 'confirm_response', allowed: true })); };
+        $('confirmDeny').onclick = function() { $('confirmOverlay').classList.add('hidden'); state.ws.send(JSON.stringify({ type: 'confirm_response', allowed: false })); };
+    }
+
+    function showPlanApproval(plan) {
+        $('planContent').textContent = plan;
+        $('planOverlay').classList.remove('hidden');
+        var sendResp = function(choice) {
+            var feedback = $('planFeedback').value;
+            $('planOverlay').classList.add('hidden');
+            $('planContent').textContent = '';
+            $('planFeedback').value = '';
+            state.ws.send(JSON.stringify({ type: 'plan_approval_response', choice: choice, feedback: feedback || undefined }));
+        };
+        $('planExecute').onclick = function() { sendResp('execute'); };
+        $('planClearExecute').onclick = function() { sendResp('clear-execute'); };
+        $('planManual').onclick = function() { sendResp('manual-execute'); };
+        $('planKeepPlanning').onclick = function() { sendResp('keep-planning'); };
+    }
+
+    function bindEvents() {
+        sendBtn.onclick = function() { var t = inputEl.value.trim(); if (t) sendMessage(t); };
+        stopBtn.onclick = function() {
+            if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                state.ws.send(JSON.stringify({ type: 'abort' }));
+            }
+            stopBtn.disabled = true;
+            stopBtn.textContent = '■ 停止中...';
+        };
+        inputEl.onkeydown = function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendBtn.click(); }
+        };
+
+        uploadBtn.onclick = function() { fileInput.click(); };
+        fileInput.onchange = function() { uploadPdf(fileInput.files[0]); };
+
+        newSessionBtn.onclick = function() {
+            state.sessionId = generateId();
+            localStorage.setItem('sessionId', state.sessionId);
+            clearLitState();
+            // Remove all messages but keep thinkingIndicator element intact
+            var msgs = messagesEl.querySelectorAll('.message, .tool-call, .literature-phase-card');
+            msgs.forEach(function(el) { el.remove(); });
+            thinkingIndicator.classList.add('hidden');
+            connectWebSocket();
+            loadSessionList();
+        };
+
+        $('settingsBtn').onclick = function() {
+            $('settingsModel').value = state.settings.model || '';
+            $('settingsApiKey').value = state.settings.api_key || '';
+            $('settingsApiBase').value = state.settings.api_base || '';
+            $('settingsOverlay').classList.remove('hidden');
+        };
+        $('settingsCancel').onclick = function() { $('settingsOverlay').classList.add('hidden'); };
+        $('settingsSave').onclick = function() {
+            state.settings = { model: $('settingsModel').value.trim(), api_key: $('settingsApiKey').value.trim(), api_base: $('settingsApiBase').value.trim() };
+            localStorage.setItem('agentSettings', JSON.stringify(state.settings));
+            $('settingsOverlay').classList.add('hidden');
+            if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                state.ws.send(JSON.stringify({ type: 'update_config', config: state.settings }));
+            }
+        };
+
+        $('clearChatBtn').onclick = function() {
+            var msgs = messagesEl.querySelectorAll('.message, .tool-call, .literature-progress-msg, .literature-phase-card');
+            msgs.forEach(function(el) { el.remove(); });
+            clearLitState();
+            currentAssistantMsg = null;
+            currentToolCallEl = null;
+        };
+    }
+
+    function loadSettings() {
+        try { var s = localStorage.getItem('agentSettings'); if (s) state.settings = JSON.parse(s); } catch (e) {}
+    }
+
+    async function loadSessionList() {
+        try {
+            var resp = await fetch('/api/sessions');
+            var sessions = await resp.json();
+            sessionListEl.innerHTML = sessions.map(function(s) {
+                var active = s.id === state.sessionId ? ' active' : '';
+                // Format last message time
+                var timeStr = '';
+                if (s.last_msg_time) {
+                    var d = new Date(s.last_msg_time * 1000);
+                    var now = new Date();
+                    var pad = function(n) { return n < 10 ? '0' + n : n; };
+                    var hhmm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+                    if (d.toDateString() === now.toDateString()) {
+                        timeStr = hhmm;
+                    } else {
+                        var yesterday = new Date(now);
+                        yesterday.setDate(yesterday.getDate() - 1);
+                        if (d.toDateString() === yesterday.toDateString()) {
+                            timeStr = '昨天 ' + hhmm;
+                        } else {
+                            timeStr = pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + hhmm;
+                        }
+                    }
+                }
+                return '<div class="session-item' + active + '" onclick="switchSession(\'' + s.id + '\')">' +
+                    '<div class="session-preview">' + escapeHtml(s.preview || '(empty)') + '</div>' +
+                    '<div class="session-meta">' + timeStr + '</div>' +
+                    '<button class="session-delete" onclick="event.stopPropagation();deleteSession(\'' + s.id + '\')" title="删除会话">&times;</button>' +
+                    '</div>';
+            }).join('');
+        } catch (e) {}
+    }
+
+    window.deleteSession = async function(sessionId) {
+        try {
+            await fetch('/api/sessions/' + sessionId, { method: 'DELETE' });
+            if (sessionId === state.sessionId) {
+                // If deleting current session, create a new one
+                document.getElementById('newSessionBtn').click();
+            } else {
+                loadSessionList();
+            }
+        } catch (e) {
+            console.error('Failed to delete session:', e);
+        }
+    };
+
+    window.switchSession = function(sessionId) {
+        state.sessionId = sessionId;
+        localStorage.setItem('sessionId', sessionId);
+        clearLitState();
+        currentAssistantMsg = null;
+        currentToolCallEl = null;
+        // 清空消息区域，loadMessages 会在 WS 连接后自动加载
+        var existing = messagesEl.querySelectorAll('.message, .tool-call, .literature-phase-card');
+        existing.forEach(function(el) { el.remove(); });
+        connectWebSocket();
+        loadSessionList();
+    };
+
+    window.openReport = function(format) {
+        // Try to get path from lit state first
+        try {
+            var lastCard = messagesEl.querySelector('.literature-phase-card:last-child');
+            if (lastCard) {
+                var links = lastCard.querySelectorAll('.report-actions a');
+                for (var i = 0; i < links.length; i++) {
+                    if (format === 'html' && links[i].textContent.includes('\u6253\u5F00')) {
+                        window.open(links[i].href, '_blank');
+                        return;
+                    }
+                }
+            }
+        } catch(e) {}
+        // Fallback: fetch from server
+        fetch('/api/get_latest_report')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (format === 'html' && data.html_path) {
+                    window.open('/api/report?path=' + encodeURIComponent(data.html_path), '_blank');
+                } else if (format === 'markdown' && data.markdown_path) {
+                    window.open('/api/report?path=' + encodeURIComponent(data.markdown_path), '_blank');
+                }
+            })
+            .catch(function(err) { console.error('Failed to open report:', err); });
+    };
+
+    document.addEventListener('DOMContentLoaded', init);
+})();
+</script>
+</body>
+</html>

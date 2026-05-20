@@ -1,0 +1,16 @@
+[Unit]
+Description=Agent Template Web Server
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/agent-template
+Environment=OPENAI_API_KEY=sk-your-key-here
+Environment=OPENAI_BASE_URL=https://api.deepseek.com/v1
+ExecStart=/usr/local/bin/uvicorn server.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

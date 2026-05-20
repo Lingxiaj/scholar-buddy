@@ -20,15 +20,30 @@
 - Python 3.11+
 - API Key（DeepSeek / OpenAI / Anthropic 任选其一）
 
-### 配置 API Key（二选一，推荐方式一）
-
-**方式一：在网页界面设置（推荐）** — 启动后直接在浏览器里填，无需接触命令行
+### 下载与运行
 
 ```bash
-# 直接启动服务（不设任何环境变量）
+# 1. 下载项目
+git clone https://github.com/Lingxiaj/scholar-buddy.git
+cd scholar-buddy
+
+# 2. 安装依赖
 pip install -r requirements.txt
+
+# 3. 启动服务
 uvicorn server.main:app --host 127.0.0.1 --port 8000
 ```
+
+### 配置 API Key
+
+启动后打开 `http://localhost:8000`，点击左上角**设置图标**，填写：
+- **API Key** — 你的 LLM 密钥（DeepSeek / OpenAI / Anthropic 任选其一）
+- **API Base URL** — 例如 `https://api.deepseek.com/v1`
+- **Model** — 例如 `deepseek-chat`
+
+设置好后会自动保存，下次打开还在。
+
+> 如需服务器部署，也可以通过环境变量 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 配置。
 
 打开 `http://localhost:8000`，点击左上角 **设置图标**，填写：
 - **API Key** → 你的密钥
